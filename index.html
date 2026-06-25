@@ -390,6 +390,7 @@ input[type=file]{display:none;}
   <div class="hdr-right">
     <div class="clock" id="clock">00:00</div>
     <div class="clockdate" id="cdate">MON 1 JAN</div>
+    <div id="syncStatus" style="font-size:0.6rem;color:var(--green);font-weight:800;opacity:0;transition:opacity .3s;text-align:right;"></div>
   </div>
 </header>
 
@@ -521,34 +522,24 @@ input[type=file]{display:none;}
   <div class="page" id="page-base">
     <div class="sec-hdr"><div class="sec-title">🌐 Google Sheets Sync</div></div>
     <div class="guide-box">
-      <h4>Step 1 — Create a Google Sheet</h4>
-      <p>Go to <strong style="color:var(--green)">sheets.google.com</strong> and create a new sheet. Name it anything (e.g. "Tobin Command"). Copy the Sheet ID from the URL — it's the long string between /d/ and /edit.</p>
-    </div>
-    <div class="guide-box">
-      <h4>Step 2 — Create an Apps Script</h4>
-      <p>Go to <strong style="color:var(--green)">script.google.com</strong> → New Project. Delete everything and paste this:</p>
-      <code id="scriptCode"></code>
-      <p>Replace <strong style="color:var(--yellow)">YOUR_SHEET_ID_HERE</strong> with your sheet ID from Step 1.</p>
-    </div>
-    <div class="guide-box">
-      <h4>Step 3 — Deploy it</h4>
-      <p>Click <strong style="color:var(--cyan)">Deploy → New Deployment → Web App</strong>. Set "Who has access" to <strong style="color:var(--yellow)">Anyone</strong>. Click Deploy. Copy the URL it gives you.</p>
-    </div>
-    <div class="guide-box">
-      <h4>Step 4 — Paste URL here</h4>
-      <p>Paste your deployment URL below. Both you and Rach use this same URL on your phones and data will sync!</p>
+      <h4>🔗 Paste Your Sheets URL</h4>
+      <p>Once you paste this and save, the app automatically syncs every time you tick something and loads fresh data every time you open it. No buttons needed.</p>
       <input class="url-input" id="sheetsUrl" type="url" placeholder="https://script.google.com/macros/s/...">
-      <div style="display:flex;gap:8px;margin-top:8px;">
+      <div style="display:flex;gap:8px;margin-top:8px;flex-wrap:wrap;">
         <button class="green-btn" onclick="saveUrl()">💾 Save URL</button>
-        <button class="green-btn" onclick="testSync()">⚡ Test Sync</button>
-        <button class="green-btn" onclick="pushToSheets()">⬆ Push Data</button>
-        <button class="green-btn" onclick="pullFromSheets()">⬇ Pull Data</button>
+        <button class="green-btn" onclick="loadFromSheets()">🔄 Sync Now</button>
       </div>
+      <p style="margin-top:10px;font-size:0.72rem;color:var(--muted);">Both you and Rach paste the same URL. Data syncs automatically between devices.</p>
+    </div>
+    <div class="guide-box">
+      <h4>📋 Apps Script Code</h4>
+      <p>Paste this into Google Apps Script (Extensions → Apps Script in your Google Sheet). Replace YOUR_SHEET_ID_HERE with your Sheet ID.</p>
+      <code id="scriptCode"></code>
     </div>
     <div class="guide-box">
       <h4>⚠️ Reset Data</h4>
-      <p>This will wipe all local data. Make sure you've pushed to Sheets first.</p>
-      <button class="green-btn" style="border-color:var(--red);color:var(--red);" onclick="resetAll()">🗑 Reset All</button>
+      <p>Wipes local data on this device only. Data in Sheets stays safe — just hit Sync Now after to reload it.</p>
+      <button class="green-btn" style="border-color:var(--red);color:var(--red);" onclick="resetAll()">🗑 Reset Device Data</button>
     </div>
   </div>
 
@@ -825,14 +816,71 @@ let S={
   snapshots:{}, // dateKey => {pct, done, total}
 };
 
-function save(){try{localStorage.setItem('tc3',JSON.stringify(S));}catch(e){}}
+// ── LOCAL SAVE (always runs, instant) ──
+function save(){
+  try{localStorage.setItem('tc3',JSON.stringify(S));}catch(e){}
+  scheduleSheetsPush();
+}
+
+// ── DEBOUNCED AUTO-PUSH TO SHEETS ──
+// Waits 1.5s after last change before pushing, so rapid taps don't spam the API
+let pushTimer=null;
+function scheduleSheetsPush(){
+  if(!S.sheetsUrl)return;
+  clearTimeout(pushTimer);
+  pushTimer=setTimeout(()=>silentPush(),1500);
+}
+
+async function silentPush(){
+  const url=S.sheetsUrl;if(!url)return;
+  try{
+    const slim={...S,heroes:{...S.heroes}};
+    ['mike','rach','rq'].forEach(p=>{slim.heroes[p]={...slim.heroes[p],photo:''};});
+    await fetch(url,{method:'POST',body:JSON.stringify(slim),headers:{'Content-Type':'text/plain'}});
+  }catch(e){console.log('Sheets push failed silently',e);}
+}
+
+// ── AUTO-LOAD FROM SHEETS ON OPEN ──
+async function loadFromSheets(){
+  const url=S.sheetsUrl;if(!url)return;
+  showSyncStatus('⏳ Syncing...');
+  try{
+    const r=await fetch(url+'?action=load&t='+Date.now());
+    const d=await r.json();
+    if(d&&d.tasks){
+      const photos={mike:S.heroes.mike.photo,rach:S.heroes.rach.photo,rq:S.heroes.rq.photo};
+      S={...d};
+      ['mike','rach','rq'].forEach(p=>{if(photos[p])S.heroes[p].photo=photos[p];});
+      ensureDefaults();
+      save();renderAll();
+      showSyncStatus('✅ Synced!');
+      setTimeout(()=>showSyncStatus(''),2000);
+    }
+  }catch(e){
+    showSyncStatus('📴 Offline');
+    setTimeout(()=>showSyncStatus(''),3000);
+  }
+}
+
+function showSyncStatus(msg){
+  let el=document.getElementById('syncStatus');
+  if(!el)return;
+  el.textContent=msg;
+  el.style.opacity=msg?'1':'0';
+}
+
 function load(){
   try{const d=localStorage.getItem('tc3');if(d)S=JSON.parse(d);}catch(e){}
+  ensureDefaults();
+}
+
+function ensureDefaults(){
   if(!S.tasks)S.tasks=JSON.parse(JSON.stringify(DEFAULTS));
   if(!S.health)S.health=JSON.parse(JSON.stringify(DEFAULT_HEALTH));
   if(!S.snapshots)S.snapshots={};
   if(!S.sheetsUrl)S.sheetsUrl='';
   ['mike','rach','rq'].forEach(p=>{
+    if(!S.heroes[p])S.heroes[p]={xp:0,totalXP:0,lv:1,badges:[],total:0,photo:'',name:p==='mike'?'Mike':p==='rach'?'Rach':'Rory-Quinn',cls:p==='mike'?'Space Commander':p==='rach'?'Star Navigator':'Little Explorer',color:p==='mike'?'cyan':p==='rach'?'pink':'purple'};
     if(!S.heroes[p].name)S.heroes[p].name=p==='mike'?'Mike':p==='rach'?'Rach':'Rory-Quinn';
     if(!S.heroes[p].cls)S.heroes[p].cls=p==='mike'?'Space Commander':p==='rach'?'Star Navigator':'Little Explorer';
     if(!S.heroes[p].color)S.heroes[p].color=p==='mike'?'cyan':p==='rach'?'pink':'purple';
@@ -1356,37 +1404,11 @@ function doPost(e) {
 
 function saveUrl(){
   S.sheetsUrl=document.getElementById('sheetsUrl').value.trim();
-  save();showToast('💾 Saved!','Sheets URL saved.');}
-async function testSync(){
-  const url=S.sheetsUrl;if(!url){showToast('⚠️ No URL','Paste your URL first.');return;}
-  try{const r=await fetch(url+'?action=load');if(r.ok){showToast('✅ Connected!','Sheets is live!');}
-  else{showToast('❌ Error','Check URL & permissions.');}}
-  catch{showToast('❌ Failed','Check URL & deployment.');}
+  save();
+  showToast('💾 Saved!','Auto-sync is now on!');
+  loadFromSheets();
 }
-async function pushToSheets(){
-  const url=S.sheetsUrl;if(!url){showToast('⚠️ No URL','Set URL first.');return;}
-  try{
-    // strip photos to save space
-    const slim={...S,heroes:{...S.heroes}};
-    ['mike','rach','rq'].forEach(p=>{slim.heroes[p]={...slim.heroes[p],photo:''};});
-    await fetch(url,{method:'POST',body:JSON.stringify(slim)});
-    showToast('⬆️ Pushed!','Data sent to Sheets!');
-  }catch{showToast('❌ Failed','Check connection.');}
-}
-async function pullFromSheets(){
-  const url=S.sheetsUrl;if(!url){showToast('⚠️ No URL','Set URL first.');return;}
-  try{
-    const r=await fetch(url+'?action=load');const d=await r.json();
-    if(d&&d.tasks){
-      // preserve photos
-      const photos={mike:S.heroes.mike.photo,rach:S.heroes.rach.photo,rq:S.heroes.rq.photo};
-      S={...d};
-      ['mike','rach','rq'].forEach(p=>{if(photos[p])S.heroes[p].photo=photos[p];});
-      save();renderAll();showToast('⬇️ Pulled!','Data loaded from Sheets!');
-    }
-  }catch{showToast('❌ Failed','Check connection.');}
-}
-function resetAll(){if(confirm('Reset ALL data? Cannot undo!')){localStorage.removeItem('tc3');location.reload();}}
+function resetAll(){if(confirm('Reset device data? Sheets data stays safe.')){localStorage.removeItem('tc3');location.reload();}}
 
 // ══════════════════════════════════════════════
 // RENDER ALL
@@ -1412,13 +1434,13 @@ function renderAll(){
   _inRender=false;
 }
 
-// ══════════════════════════════════════════════
-// INIT
-// ══════════════════════════════════════════════
+// ── INIT ──
 load();
 updClock();
 setInterval(updClock,30000);
 renderAll();
+// Auto-load from Sheets on every open if URL is set
+if(S.sheetsUrl){loadFromSheets();}
 </script>
 </body>
 </html>
